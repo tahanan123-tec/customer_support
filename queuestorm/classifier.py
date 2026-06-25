@@ -1,5 +1,6 @@
 import os
 import json
+import httpx
 from anthropic import AsyncAnthropic
 from queuestorm.models import TicketResponse
 
@@ -28,7 +29,7 @@ NEVER include the words PIN, OTP, password, or card number in agent_summary."""
 
 async def classify_ticket(message: str, locale: str = "en") -> dict:
     """
-    Call the Anthropic API using AsyncAnthropic to analyze the support ticket text.
+    Call either the OpenRouter API or standard Anthropic API depending on configured environment.
     Uses the exact system prompt rules to classify the ticket into a JSON structure.
 
     On failure, retries once. If still failing, returns a fallback dictionary.
@@ -49,27 +50,69 @@ async def classify_ticket(message: str, locale: str = "en") -> dict:
         "confidence": 0.1
     }
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("[WARNING] ANTHROPIC_API_KEY is not set in environment.")
-        return fallback
+    # Configuration detection
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
 
-    client = AsyncAnthropic(api_key=api_key)
+    # Detect if we should use OpenRouter
+    is_openrouter = openrouter_key is not None or (anthropic_key and (anthropic_key.startswith("sk-or-") or "openrouter" in os.environ.get("OPENROUTER_API_BASE", "").lower()))
+    
+    # Configure Key & Model
+    api_key = openrouter_key or anthropic_key
+    default_model = "anthropic/claude-3.5-sonnet" if is_openrouter else "claude-sonnet-4-6"
+    model = os.environ.get("LLM_MODEL", default_model)
+
+    if not api_key:
+        print("[WARNING] No LLM API Key (OPENROUTER_API_KEY or ANTHROPIC_API_KEY) set in environment.")
+        return fallback
 
     for attempt in range(2):
         try:
-            response = await client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=500,
-                system=SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"Message: {message}\nLocale: {locale}"
-                    }
-                ]
-            )
-            content = response.content[0].text.strip()
+            if is_openrouter:
+                # OpenRouter API call using httpx (OpenAI-compatible)
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "https://queuestorm.com",
+                            "X-Title": "QueueStorm Classifier"
+                        },
+                        json={
+                            "model": model,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": SYSTEM_PROMPT
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Message: {message}\nLocale: {locale}"
+                                }
+                            ],
+                            "max_tokens": 500
+                        },
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    res_json = response.json()
+                    content = res_json["choices"][0]["message"]["content"].strip()
+            else:
+                # Standard Anthropic SDK call
+                client = AsyncAnthropic(api_key=api_key)
+                response = await client.messages.create(
+                    model=model,
+                    max_tokens=500,
+                    system=SYSTEM_PROMPT,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": f"Message: {message}\nLocale: {locale}"
+                        }
+                    ]
+                )
+                content = response.content[0].text.strip()
             
             # Clean up potential markdown code fence markers if model wrapped JSON
             if content.startswith("```"):
@@ -109,7 +152,6 @@ async def classify_ticket_with_ai(ticket_id: str, text: str, locale: str = "en")
         TicketResponse: The Pydantic model response.
     """
     res = await classify_ticket(text, locale)
-    # Assume human review is required if confidence is low (< 0.8) or safety/fraud triggers it
     human_review = res["confidence"] < 0.8 or res["case_type"] == "phishing_or_social_engineering"
     
     return TicketResponse(

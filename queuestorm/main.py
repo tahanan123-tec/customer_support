@@ -25,11 +25,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     load_dotenv()
     
     # Verify environment variables
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        print("[WARNING] ANTHROPIC_API_KEY is not set. AI-based classification will fail!")
+        print("[WARNING] Neither OPENROUTER_API_KEY nor ANTHROPIC_API_KEY is set. AI-based classification will fail!")
     else:
-        print("[INFO] ANTHROPIC_API_KEY loaded successfully.")
+        print("[INFO] LLM API key loaded successfully.")
 
     print("[STARTUP] QueueStorm FastAPI CRM Ticket Classifier is starting up...")
     
